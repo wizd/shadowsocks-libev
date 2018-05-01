@@ -51,6 +51,8 @@
 
 #include <libcork/core.h>
 
+#include <socks6msg.h>
+
 #include "netutils.h"
 #include "utils.h"
 #include "socks5.h"
@@ -105,6 +107,7 @@ static int fast_open = 0;
 static int no_delay  = 0;
 static int udp_fd    = 0;
 static int ret_val   = 0;
+static int force_tfo = 0;
 
 static struct ev_signal sigint_watcher;
 static struct ev_signal sigterm_watcher;
