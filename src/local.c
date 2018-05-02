@@ -441,7 +441,7 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
     size_t req_len = S6M_Request_Pack(&s6_req, (uint8_t *)abuf->data, abuf->capacity, &err);
     if (req_len < 0)
     {
-        LOGE("socks pack error: %s", S6M_Error_Msg(err));
+        LOGE("socks 6 pack error: %s", S6M_Error_Msg(err));
         close_and_free_remote(EV_A_ remote);
         close_and_free_server(EV_A_ server);
         return -1;
