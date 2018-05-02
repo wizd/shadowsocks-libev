@@ -366,8 +366,12 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
     abuf->idx = 0;
     abuf->len = 0;
 
-    abuf->data[abuf->len++] = request->atyp;
     int atyp = request->atyp;
+    
+    struct S6M_Request s6_req;
+    memset(&s6_req, 0 , sizeof(struct S6M_Request));
+    s6_req.code = (enum SOCKS6RequestCode)request->cmd;
+    s6_req.optionSet.tfo = force_tfo;
 
     // get remote addr and port
     if (atyp == 1) {
@@ -376,8 +380,9 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
         if (buf->len < request_len + in_addr_len + 2) {
             return -1;
         }
-        memcpy(abuf->data + abuf->len, buf->data + request_len, in_addr_len + 2);
-        abuf->len += in_addr_len + 2;
+        s6_req.addr.type = SOCKS6_ADDR_IPV4;
+        s6_req.addr.ipv4 = *((struct in_addr *)(buf->data + request_len));
+        s6_req.port = ntohs((uint16_t *)(buf->data + request_len + in_addr_len));
 
         if (acl || verbose) {
             uint16_t p = ntohs(*(uint16_t *)(buf->data + request_len + in_addr_len));
@@ -391,9 +396,11 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
         if (buf->len < request_len + 1 + name_len + 2) {
             return -1;
         }
-        abuf->data[abuf->len++] = name_len;
-        memcpy(abuf->data + abuf->len, buf->data + request_len + 1, name_len + 2);
-        abuf->len += name_len + 2;
+        s6_req.addr.type = SOCKS6_ADDR_DOMAIN;
+        s6_req.addr.domain = host;
+        memcpy(host, buf->data + request_len + 1, name_len);
+        host[name_len] = '\0';
+        s6_req.port = ntohs((uint16_t *)(buf->data + request_len + 1 + name_len));
 
         if (acl || verbose) {
             uint16_t p =
@@ -408,8 +415,9 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
         if (buf->len < request_len + in6_addr_len + 2) {
             return -1;
         }
-        memcpy(abuf->data + abuf->len, buf->data + request_len, in6_addr_len + 2);
-        abuf->len += in6_addr_len + 2;
+        s6_req.addr.type = SOCKS6_ADDR_IPV6;
+        s6_req.addr.ipv6 = *((struct in6_addr *)(buf->data + request_len));
+        s6_req.port = ntohs((uint16_t *)(buf->data + request_len + in6_addr_len));
 
         if (acl || verbose) {
             uint16_t p = ntohs(*(uint16_t *)(buf->data + request_len + in6_addr_len));
@@ -423,13 +431,24 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
         close_and_free_server(EV_A_ server);
         return -1;
     }
+    
+    enum S6M_Error err;
+    size_t req_len = S6M_Request_Pack(&s6_req, (uint8_t *)abuf->data, abuf->capacity, &err);
+    if (req_len < 0)
+    {
+        LOGE("socks pack error: %s", S6M_Error_Msg(err));
+        close_and_free_remote(EV_A_ remote);
+        close_and_free_server(EV_A_ server);
+        return -1;
+    }
+    abuf->len = req_len;
 
     size_t abuf_len  = abuf->len;
     int sni_detected = 0;
     int ret          = 0;
 
     char *hostname;
-    uint16_t dst_port = ntohs(*(uint16_t *)(abuf->data + abuf->len - 2));
+    uint16_t dst_port = s6_req.port;
 
     if (atyp == 1 || atyp == 4) {
         if (dst_port == http_protocol->default_port)
