@@ -437,11 +437,10 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
         return -1;
     }
     
-    enum S6M_Error err;
-    size_t req_len = S6M_Request_Pack(&s6_req, (uint8_t *)abuf->data, abuf->capacity, &err);
+    size_t req_len = S6M_Request_Pack(&s6_req, (uint8_t *)abuf->data, abuf->capacity);
     if (req_len < 0)
     {
-        LOGE("socks 6 pack error: %s", S6M_Error_Msg(err));
+        LOGE("socks 6 pack error: %s", S6M_Error_Msg(req_len));
         close_and_free_remote(EV_A_ remote);
         close_and_free_server(EV_A_ server);
         return -1;
@@ -1046,6 +1045,68 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
             return; // Wait for more
         }
     }
+    
+    if (!server->got_authrep) {
+        struct S6M_AuthReply *authrep;
+        ssize_t authrep_len = S6M_AuthReply_Parse((uint8_t *)server->buf->data, server->buf->len, &authrep);
+        
+        if (authrep_len == S6M_ERR_BUFFER)
+            return;
+        if (authrep_len < 0) {
+            LOGE("error parsing authentication reply %s", S6M_Error_Msg(authrep_len));
+            close_and_free_remote(EV_A_ remote);
+            close_and_free_server(EV_A_ server);
+            return;
+        }
+        
+        if (authrep->code != SOCKS6_AUTH_REPLY_SUCCESS)
+        {
+            LOGE("auth failed");
+            S6M_AuthReply_Free(authrep);
+            close_and_free_remote(EV_A_ remote);
+            close_and_free_server(EV_A_ server);
+            return;
+        }
+        
+        server->got_authrep = 1;
+        S6M_AuthReply_Free(authrep);
+        
+        server->buf->len -= authrep_len;
+        if (server->buf->len == 0)
+            return;
+        memmove(server->buf->data, server->buf->data + authrep_len, server->buf->len);
+    }
+    
+    if (!server->got_oprep) {
+        struct S6M_OpReply *oprep;
+        ssize_t oprep_len = S6M_OpReply_Parse((uint8_t *)server->buf->data, server->buf->len, &oprep);
+        
+        if (oprep_len == S6M_ERR_BUFFER)
+            return;
+        if (oprep_len < 0) {
+            LOGE("error parsing operation reply %s", S6M_Error_Msg(oprep_len));
+            close_and_free_remote(EV_A_ remote);
+            close_and_free_server(EV_A_ server);
+            return;
+        }
+        
+        if (oprep->code != SOCKS6_OPERATION_REPLY_SUCCESS)
+        {
+            LOGE("operation failed %d", oprep->code);
+            S6M_OpReply_Free(oprep);
+            close_and_free_remote(EV_A_ remote);
+            close_and_free_server(EV_A_ server);
+            return;
+        }
+        
+        server->got_oprep = 1;
+        S6M_OpReply_Free(oprep);
+        
+        server->buf->len -= oprep_len;
+        if (server->buf->len == 0)
+            return;
+        memmove(server->buf->data, server->buf->data + oprep_len, server->buf->len);
+    }
 
     int s = send(server->fd, server->buf->data, server->buf->len, 0);
 
@@ -1265,6 +1326,9 @@ new_server(int fd)
                   delayed_connect_cb, 0.05, 0);
 
     cork_dllist_add(&connections, &server->entries);
+    
+    server->got_authrep = 0;
+    server->got_oprep = 0;
 
     return server;
 }
@@ -1490,6 +1554,7 @@ main(int argc, char **argv)
         { "password",    required_argument, NULL, GETOPT_VAL_PASSWORD    },
         { "key",         required_argument, NULL, GETOPT_VAL_KEY         },
         { "help",        no_argument,       NULL, GETOPT_VAL_HELP        },
+        { "force-tfo",   no_argument,       NULL, GETOPT_VAL_FORCE_TFO   },
         { NULL,                          0, NULL,                      0 }
     };
 
@@ -1610,6 +1675,9 @@ main(int argc, char **argv)
             // The option character is not recognized.
             LOGE("Unrecognized option: %s", optarg);
             opterr = 1;
+            break;
+        case GETOPT_VAL_FORCE_TFO:
+            force_tfo = 1;
             break;
         }
     }
