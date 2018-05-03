@@ -799,20 +799,17 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         }
         return;
     } else if (server->stage == STAGE_INIT) {
-        /*
-         * Shadowsocks TCP Relay Header:
-         *
-         *    +------+----------+----------+
-         *    | ATYP | DST.ADDR | DST.PORT |
-         *    +------+----------+----------+
-         *    |  1   | Variable |    2     |
-         *    +------+----------+----------+
-         *
-         */
+        ssize_t req_len = S6M_Request_Parse((uint8_t *)server->buf->data, server->buf->len, &server->req);
+        if (req_len == S6M_ERR_BUFFER)
+            return;
+        if (req_len < 0){
+            LOGE("error parsing request: %s", S6M_Error_Msg(req_len));
+            close_and_free_server(EV_A_ server);
+            return;
+        }
 
-        int offset     = 0;
         int need_query = 0;
-        char atyp      = server->buf->data[offset++];
+        char atyp      = server->req->addr.type;
         char host[257] = { 0 };
         uint16_t port  = 0;
         struct addrinfo info;
@@ -824,19 +821,11 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         if ((atyp & ADDRTYPE_MASK) == 1) {
             // IP V4
             struct sockaddr_in *addr = (struct sockaddr_in *)&storage;
-            size_t in_addr_len       = sizeof(struct in_addr);
             addr->sin_family = AF_INET;
-            if (server->buf->len >= in_addr_len + 3) {
-                addr->sin_addr = *(struct in_addr *)(server->buf->data + offset);
-                inet_ntop(AF_INET, (const void *)(server->buf->data + offset),
-                          host, INET_ADDRSTRLEN);
-                offset += in_addr_len;
-            } else {
-                report_addr(server->fd, MALFORMED, "invalid length for ipv4 address");
-                close_and_free_server(EV_A_ server);
-                return;
-            }
-            addr->sin_port   = *(uint16_t *)(server->buf->data + offset);
+            addr->sin_addr = server->req->addr.ipv4;
+            inet_ntop(AF_INET, (const void *)(&server->req->addr.ipv4),
+                      host, INET_ADDRSTRLEN);
+            addr->sin_port   = htons(server->req->port);
             info.ai_family   = AF_INET;
             info.ai_socktype = SOCK_STREAM;
             info.ai_protocol = IPPROTO_TCP;
@@ -844,15 +833,8 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
             info.ai_addr     = (struct sockaddr *)addr;
         } else if ((atyp & ADDRTYPE_MASK) == 3) {
             // Domain name
-            uint8_t name_len = *(uint8_t *)(server->buf->data + offset);
-            if (name_len + 4 <= server->buf->len) {
-                memcpy(host, server->buf->data + offset + 1, name_len);
-                offset += name_len + 1;
-            } else {
-                report_addr(server->fd, MALFORMED, "invalid host name length");
-                close_and_free_server(EV_A_ server);
-                return;
-            }
+            uint8_t name_len = strlen(server->req->addr.domain);
+            memcpy(host, server->req->addr.domain, name_len);
             if (acl && outbound_block_match_host(host) == 1) {
                 if (verbose)
                     LOGI("outbound blocked %s", host);
@@ -866,7 +848,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
                 if (ip.version == 4) {
                     struct sockaddr_in *addr = (struct sockaddr_in *)&storage;
                     inet_pton(AF_INET, host, &(addr->sin_addr));
-                    addr->sin_port   = *(uint16_t *)(server->buf->data + offset);
+                    addr->sin_port   = htons(server->req->port);
                     addr->sin_family = AF_INET;
                     info.ai_family   = AF_INET;
                     info.ai_addrlen  = sizeof(struct sockaddr_in);
@@ -874,7 +856,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
                 } else if (ip.version == 6) {
                     struct sockaddr_in6 *addr = (struct sockaddr_in6 *)&storage;
                     inet_pton(AF_INET6, host, &(addr->sin6_addr));
-                    addr->sin6_port   = *(uint16_t *)(server->buf->data + offset);
+                    addr->sin6_port   = htons(server->req->port);
                     addr->sin6_family = AF_INET6;
                     info.ai_family    = AF_INET6;
                     info.ai_addrlen   = sizeof(struct sockaddr_in6);
@@ -891,20 +873,9 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         } else if ((atyp & ADDRTYPE_MASK) == 4) {
             // IP V6
             struct sockaddr_in6 *addr = (struct sockaddr_in6 *)&storage;
-            size_t in6_addr_len       = sizeof(struct in6_addr);
             addr->sin6_family = AF_INET6;
-            if (server->buf->len >= in6_addr_len + 3) {
-                addr->sin6_addr = *(struct in6_addr *)(server->buf->data + offset);
-                inet_ntop(AF_INET6, (const void *)(server->buf->data + offset),
-                          host, INET6_ADDRSTRLEN);
-                offset += in6_addr_len;
-            } else {
-                LOGE("invalid header with addr type %d", atyp);
-                report_addr(server->fd, MALFORMED, "invalid length for ipv6 address");
-                close_and_free_server(EV_A_ server);
-                return;
-            }
-            addr->sin6_port  = *(uint16_t *)(server->buf->data + offset);
+            addr->sin6_addr = server->req->addr.ipv6;
+            addr->sin6_port  = htons(server->req->port);
             info.ai_family   = AF_INET6;
             info.ai_socktype = SOCK_STREAM;
             info.ai_protocol = IPPROTO_TCP;
@@ -912,24 +883,10 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
             info.ai_addr     = (struct sockaddr *)addr;
         }
 
-        if (offset == 1) {
-            report_addr(server->fd, MALFORMED, "invalid address type");
-            close_and_free_server(EV_A_ server);
-            return;
-        }
+        port = htons(server->req->port);
 
-        port = (*(uint16_t *)(server->buf->data + offset));
-
-        offset += 2;
-
-        if (server->buf->len < offset) {
-            report_addr(server->fd, MALFORMED, "invalid request length");
-            close_and_free_server(EV_A_ server);
-            return;
-        } else {
-            server->buf->len -= offset;
-            memmove(server->buf->data, server->buf->data + offset, server->buf->len);
-        }
+        server->buf->len -= req_len;
+        memmove(server->buf->data, server->buf->data + req_len, server->buf->len);
 
         if (verbose) {
             if ((atyp & ADDRTYPE_MASK) == 4)
@@ -1435,6 +1392,8 @@ new_server(int fd, listen_ctx_t *listener)
                   request_timeout, listener->timeout);
 
     cork_dllist_add(&connections, &server->entries);
+    
+    server->req = NULL;
 
     return server;
 }
@@ -1470,6 +1429,9 @@ free_server(server_t *server)
         bfree(server->buf);
         ss_free(server->buf);
     }
+    
+    if (server->req)
+        S6M_Request_Free(server->req);
 
     ss_free(server->recv_ctx);
     ss_free(server->send_ctx);
