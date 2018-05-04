@@ -524,7 +524,7 @@ connect_to_remote(EV_P_ struct addrinfo *res,
 
     remote_t *remote = new_remote(sockfd);
 
-    if (fast_open) {
+    if (fast_open && server->req->optionSet.tfo) {
 #if defined(MSG_FASTOPEN) && !defined(TCP_FASTOPEN_CONNECT)
         int s = -1;
         s = sendto(sockfd, server->buf->data, server->buf->len,
@@ -717,6 +717,123 @@ setTosFromConnmark(remote_t *remote, server_t *server)
 
 #endif
 
+static ssize_t
+send_stuff(int fd, const uint8_t *buf, size_t size)
+{
+    do
+    {
+        ssize_t sent = send(fd, buf, size, 0);
+        if (sent < 0)
+        {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                continue;
+            
+            return -1;
+        }
+        buf += sent;
+        size -= sent;
+    }
+    while (size > 0);
+    
+    return 0;
+}
+
+static int
+send_auth_reply(int fd)
+{
+    struct S6M_AuthReply auth_rep = {
+        .code = SOCKS6_AUTH_REPLY_SUCCESS,
+        .method = SOCKS6_METHOD_NOAUTH,
+    };
+    
+    ssize_t size;
+    uint8_t buf[1500];
+    
+    size = S6M_AuthReply_Pack(&auth_rep, buf, 1500);
+    if (size < 0)
+    {
+        LOGE("error packing auth reply: %s", S6M_Error_Msg(size));
+        return -1;
+    }
+    
+    size = send_stuff(fd, buf, size);
+    if (size < 0)
+        return -1;
+    
+    return 0;
+}
+
+static void
+fill_address(struct S6M_OpReply *op_reply, int fd)
+{
+    op_reply->addr.type = SOCKS6_ADDR_IPV4;
+    op_reply->addr.ipv4.s_addr = 0;
+    
+    if (fd < 0)
+        return;
+    
+    char sockaddr_buf[sizeof(struct sockaddr_in6)]; //the biggest one
+    socklen_t len = sizeof(sockaddr_buf);
+    struct sockaddr *addr = (struct sockaddr *)sockaddr_buf;
+    int err;
+    
+    memset(sockaddr_buf, 0, len);
+    err = getsockname(fd, addr, &len);
+    if (err < 0)
+    {
+        LOGE("getsockname error %d", errno);
+        return;
+    }
+    
+    if (addr->sa_family == AF_INET)
+    {
+        struct sockaddr_in *addr_4 = (struct sockaddr_in *)addr;
+        
+        op_reply->addr.type = SOCKS6_ADDR_IPV4;
+        op_reply->addr.ipv4 = addr_4->sin_addr;
+        op_reply->port = ntohs(addr_4->sin_port);
+    }
+    else if (addr->sa_family == AF_INET6)
+    {
+        struct sockaddr_in6 *addr_6 = (struct sockaddr_in6 *)addr;
+        
+        op_reply->addr.type = SOCKS6_ADDR_IPV6;
+        op_reply->addr.ipv6 = addr_6->sin6_addr;
+        op_reply->port = ntohs(addr_6->sin6_port);
+    }
+    else // IPv7?
+    {
+        LOGE("getsockname returned weird AF %d", addr->sa_family);
+    }
+}
+
+static int
+send_op_reply(int fd, enum SOCKS6OperationReplyCode code, int bind_fd, uint16_t data_offset)
+{
+    struct S6M_OpReply op_rep = {
+        .code = code,
+        .initDataOff = data_offset,     
+    };
+    
+    fill_address(&op_rep, bind_fd);
+    
+    ssize_t size;
+    uint8_t buf[1500];
+    
+    size = S6M_OpReply_Pack(&op_rep, buf, 1500);
+    if (size < 0)
+    {
+        LOGE("error packing op reply: %s", S6M_Error_Msg(size));
+        return -1;
+    }
+    
+    size = send_stuff(fd, buf, size);
+    if (size < 0)
+        return -1;
+    
+    return 0;
+}
+
 static void
 server_recv_cb(EV_P_ ev_io *w, int revents)
 {
@@ -804,6 +921,14 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
             return;
         if (req_len < 0){
             LOGE("error parsing request: %s", S6M_Error_Msg(req_len));
+            close_and_free_server(EV_A_ server);
+            return;
+        }
+        
+        ssize_t size = send_auth_reply(server->fd);
+        if (size < 0)
+        {
+            LOGE("error sending auth reply");
             close_and_free_server(EV_A_ server);
             return;
         }
@@ -900,6 +1025,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
 
             if (remote == NULL) {
                 LOGE("connect error");
+                send_op_reply(server->fd, SOCKS6_OPERATION_REPLY_REFUSED, -1, 0);
                 close_and_free_server(EV_A_ server);
                 return;
             } else {
@@ -1042,6 +1168,7 @@ resolv_cb(struct sockaddr *addr, void *data)
 
     if (addr == NULL) {
         LOGE("unable to resolve %s", query->hostname);
+        send_op_reply(server->fd, SOCKS6_OPERATION_REPLY_FAILURE, -1, 0);
         close_and_free_server(EV_A_ server);
     } else {
         if (verbose) {
@@ -1065,6 +1192,7 @@ resolv_cb(struct sockaddr *addr, void *data)
         remote_t *remote = connect_to_remote(EV_A_ & info, server);
 
         if (remote == NULL) {
+            send_op_reply(server->fd, SOCKS6_OPERATION_REPLY_REFUSED, -1, 0);
             close_and_free_server(EV_A_ server);
         } else {
             server->remote = remote;
@@ -1224,6 +1352,14 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
                 LOGI("remote connected");
             }
             remote_send_ctx->connected = 1;
+            
+            if (send_op_reply(server->fd, SOCKS6_OPERATION_REPLY_SUCCESS, remote->fd, server->req->initialDataLen) < 0)
+            {
+                LOGE("error sending op reply");
+                close_and_free_remote(EV_A_ remote);
+                close_and_free_server(EV_A_ server);
+                return;
+            }
 
             // Clear the state of this address in the block list
             reset_addr(server->fd);
@@ -1238,6 +1374,7 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
         } else {
             ERROR("getpeername");
             // not connected
+            send_op_reply(server->fd, SOCKS6_OPERATION_REPLY_REFUSED, -1, 0);
             close_and_free_remote(EV_A_ remote);
             close_and_free_server(EV_A_ server);
             return;
