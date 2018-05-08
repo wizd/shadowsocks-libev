@@ -384,7 +384,7 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
         }
         s6_req.addr.type = SOCKS6_ADDR_IPV4;
         s6_req.addr.ipv4 = *((struct in_addr *)(buf->data + request_len));
-        s6_req.port = ntohs((uint16_t *)(buf->data + request_len + in_addr_len));
+        s6_req.port = ntohs(*(uint16_t *)(buf->data + request_len + in_addr_len));
         abuf_len += in_addr_len + 2;
 
         if (acl || verbose) {
@@ -403,7 +403,7 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
         s6_req.addr.domain = host;
         memcpy(host, buf->data + request_len + 1, name_len);
         host[name_len] = '\0';
-        s6_req.port = ntohs((uint16_t *)(buf->data + request_len + 1 + name_len));
+        s6_req.port = ntohs(*(uint16_t *)(buf->data + request_len + 1 + name_len));
         abuf_len += name_len + 2;
 
         if (acl || verbose) {
@@ -421,7 +421,7 @@ server_handshake(EV_P_ ev_io *w, buffer_t *buf)
         }
         s6_req.addr.type = SOCKS6_ADDR_IPV6;
         s6_req.addr.ipv6 = *((struct in6_addr *)(buf->data + request_len));
-        s6_req.port = ntohs((uint16_t *)(buf->data + request_len + in6_addr_len));
+        s6_req.port = ntohs(*(uint16_t *)(buf->data + request_len + in6_addr_len));
         abuf->len += in6_addr_len + 2;
 
         if (acl || verbose) {
