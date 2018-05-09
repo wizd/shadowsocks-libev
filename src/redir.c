@@ -574,7 +574,7 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
                 req.port = ntohs(((struct sockaddr_in *)&(server->destaddr))->sin_port);
             }
 
-            ssize_t req_len = S6M_Request_Pack(&req, (uint8_t *)abuf->data, abuf->len);
+            ssize_t req_len = S6M_Request_Pack(&req, (uint8_t *)abuf->data, abuf->capacity);
             if (req_len < 0)
             {
                 LOGE("error packing request: %s", S6M_Error_Msg(req_len));
