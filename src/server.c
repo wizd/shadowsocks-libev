@@ -613,7 +613,7 @@ connect_to_remote(EV_P_ struct addrinfo *res,
         }
     }
 
-    if (!fast_open) {
+    if (!fast_open || !server->req->optionSet.tfo) {
         int r = connect(sockfd, res->ai_addr, res->ai_addrlen);
 
         if (r == -1 && errno != CONNECT_IN_PROGRESS) {
