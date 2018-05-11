@@ -807,12 +807,25 @@ fill_address(struct S6M_OpReply *op_reply, int fd)
     }
 }
 
+static int was_mptcp(int fd)
+{
+    int opt;
+    socklen_t opt_size = sizeof(opt);
+    int err = getsockopt(fd, SOL_TCP, mptcp_enabled_values[0], &opt, &opt_size);
+    if (err < 0)
+        return 0;
+    return opt;
+}
+
 static int
 send_op_reply(int fd, enum SOCKS6OperationReplyCode code, int bind_fd, uint16_t data_offset)
 {
     struct S6M_OpReply op_rep = {
         .code = code,
-        .initDataOff = data_offset,     
+        .initDataOff = data_offset,
+        .optionSet = {
+            .mptcp = was_mptcp(bind_fd),
+        },
     };
     
     fill_address(&op_rep, bind_fd);
