@@ -820,7 +820,7 @@ was_mptcp(int fd)
     int err = getsockopt(fd, SOL_TCP, MPTCP_PATH_MANAGER, opt, &opt_size);
     if (err < 0)
         return 0;
-    return opt[0] !=  '\0';
+    return opt[0] != '\0';
 }
 
 static int
