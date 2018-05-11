@@ -66,6 +66,11 @@
 #define EWOULDBLOCK EAGAIN
 #endif
 
+
+#ifndef MPTCP_PATH_MANAGER
+#define MPTCP_PATH_MANAGER 43
+#endif
+
 #ifndef BUF_SIZE
 #define BUF_SIZE 2048
 #endif
@@ -807,14 +812,15 @@ fill_address(struct S6M_OpReply *op_reply, int fd)
     }
 }
 
-static int was_mptcp(int fd)
+static int
+was_mptcp(int fd)
 {
-    int opt;
+    char opt[20];
     socklen_t opt_size = sizeof(opt);
-    int err = getsockopt(fd, SOL_TCP, mptcp_enabled_values[0], &opt, &opt_size);
+    int err = getsockopt(fd, SOL_TCP, MPTCP_PATH_MANAGER, opt, &opt_size);
     if (err < 0)
         return 0;
-    return opt;
+    return opt[0] !=  '\0';
 }
 
 static int
