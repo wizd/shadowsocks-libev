@@ -44,6 +44,7 @@
 #include <libcork/core.h>
 
 #include <socks6msg.h>
+#include <socks6util.h>
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -61,14 +62,6 @@
 
 #ifndef EWOULDBLOCK
 #define EWOULDBLOCK EAGAIN
-#endif
-
-#ifndef TCP_SAVE_SYN
-#define TCP_SAVE_SYN 27
-#endif
-
-#ifndef TCP_SAVED_SYN
-#define TCP_SAVED_SYN 28
 #endif
 
 #ifndef BUF_SIZE
@@ -745,56 +738,19 @@ close_and_free_remote(EV_P_ remote_t *remote)
     }
 }
 
-#define TCPOPT_EOL 0
-#define TCPOPT_NOP 1
-#define TCPOPT_TFO 34
-
 static int
 was_tfo(int fd)
 {
     if (!save_syns)
         return 0;
     
-    unsigned char buf[BUF_SIZE];
-    socklen_t buf_size = BUF_SIZE;
-    int err = getsockopt(fd, SOL_TCP, TCP_SAVED_SYN, buf, &buf_size);
-    
-    if (err < 0) {
+    int rc = S6U_Socket_TFOAttempted(fd);
+    if (rc < 0) {
         LOGE("getsockopt(TCP_SAVED_SYN) failed: %d", errno);
         return 0;
     }
     
-    struct tcphdr *tcp_header;
-    struct ip *ip_header = (struct ip *)buf;
-    if (ip_header->ip_v == 4)
-        tcp_header = (struct tcphdr *)(buf + ip_header->ip_hl * 4);
-    else if (ip_header->ip_v == 6)
-        tcp_header = (struct tcphdr *)(buf + sizeof(struct ip6_hdr));
-    else
-        return 0; //IPv7 is here!
-    
-    /* sanity assured by the (Linux) kernel up to here; options can still be spurious */
-    
-    unsigned char *options = (unsigned char *)(tcp_header + 1);
-    int options_len = tcp_header->doff * 4 - sizeof(struct tcphdr);
-    
-    for (int i = 0; i < options_len - 1;) {
-        if (options[i] == TCPOPT_EOL)
-            return 0;
-        if (options[i] == TCPOPT_TFO)
-            return 1;
-        if (options[i] == TCPOPT_NOP) {
-            i++;
-            continue;
-        }
-        
-        int optlen = options[i + 1];
-        if (optlen < 2)
-            return 0;
-        i += optlen;
-    }
-    
-    return 0;
+    return rc;
 }
 
 static server_t *
@@ -826,7 +782,7 @@ new_server(int fd)
     ev_timer_init(&server->delayed_connect_watcher, delayed_connect_cb, 0.05,
                   0);
     
-    server->try_tfo  = force_tfo || (fast_open && was_tfo(fd));
+    server->try_tfo  = force_tfo || (fast_open && was_tfo(fd) > 0);
     server->got_authrep = 0;
     server->got_oprep = 0;
 
@@ -1381,11 +1337,10 @@ main(int argc, char **argv)
             
             if (fast_open && !force_tfo)
             {
-                static const int one = 1;
-                if (setsockopt(listenfd, SOL_TCP, TCP_SAVE_SYN, &one, sizeof(one)) == 0)
+                if (S6U_Socket_SaveSYN(listenfd) == 0)
                     save_syns = 1;
                 else
-                    LOGE("can't detect TFO connection attempts");
+                    LOGE("can't detect TFO connection attempts: %s", strerror(errno));
             }
 
             listen_ctx_current->fd = listenfd;

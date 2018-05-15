@@ -3,6 +3,7 @@ VERSION_INFO = 2:0:0
 AM_CFLAGS = -g -O2 -Wall -Werror -Wno-deprecated-declarations -fno-strict-aliasing -std=gnu99 -D_GNU_SOURCE
 AM_CFLAGS += $(PTHREAD_CFLAGS)
 AM_CFLAGS += -I$(top_srcdir)/libsocks6msg
+AM_CFLAGS += -I$(top_srcdir)/libsocks6util
 if !USE_SYSTEM_SHARED_LIB
 AM_CFLAGS += -I$(top_srcdir)/libbloom
 AM_CFLAGS += -I$(top_srcdir)/libipset/include
@@ -10,7 +11,9 @@ AM_CFLAGS += -I$(top_srcdir)/libcork/include
 endif
 AM_CFLAGS += $(LIBPCRE_CFLAGS)
 
-SS_COMMON_LIBS = $(INET_NTOP_LIB) $(LIBPCRE_LIBS) $(top_builddir)/libsocks6msg/libsocks6msg.a
+SS_COMMON_LIBS = $(INET_NTOP_LIB) $(LIBPCRE_LIBS)
+SS_COMMON_LIBS += $(top_builddir)/libsocks6msg/libsocks6msg.a
+SS_COMMON_LIBS += $(top_builddir)/libsocks6util/libsocks6util.a
 if !USE_SYSTEM_SHARED_LIB
 SS_COMMON_LIBS += $(top_builddir)/libbloom/libbloom.la \
                   $(top_builddir)/libipset/libipset.la \

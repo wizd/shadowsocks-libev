@@ -45,6 +45,8 @@
 #endif
 #include <libcork/core.h>
 
+#include <socks6util.h>
+
 #if defined(HAVE_SYS_IOCTL_H) && defined(HAVE_NET_IF_H) && defined(__linux__)
 #include <net/if.h>
 #include <sys/ioctl.h>
@@ -66,10 +68,6 @@
 #define EWOULDBLOCK EAGAIN
 #endif
 
-
-#ifndef MPTCP_PATH_MANAGER
-#define MPTCP_PATH_MANAGER 43
-#endif
 
 #ifndef BUF_SIZE
 #define BUF_SIZE 2048
@@ -813,24 +811,13 @@ fill_address(struct S6M_OpReply *op_reply, int fd)
 }
 
 static int
-was_mptcp(int fd)
-{
-    char opt[20];
-    socklen_t opt_size = sizeof(opt);
-    int err = getsockopt(fd, SOL_TCP, MPTCP_PATH_MANAGER, opt, &opt_size);
-    if (err < 0)
-        return 0;
-    return opt[0] != '\0';
-}
-
-static int
 send_op_reply(int fd, enum SOCKS6OperationReplyCode code, int bind_fd, uint16_t data_offset)
 {
     struct S6M_OpReply op_rep = {
         .code = code,
         .initDataOff = data_offset,
         .optionSet = {
-            .mptcp = was_mptcp(bind_fd),
+            .mptcp = S6U_Socket_HasMPTCP(bind_fd),
         },
     };
     
