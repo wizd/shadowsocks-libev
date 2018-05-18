@@ -429,12 +429,12 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
     
     if (!server->got_authrep) {
         struct S6M_AuthReply *authrep;
-        ssize_t authrep_len = S6M_AuthReply_Parse((uint8_t *)server->buf->data, server->buf->len, &authrep);
+        ssize_t authrep_len = S6M_AuthReply_parse((uint8_t *)server->buf->data, server->buf->len, &authrep);
         
         if (authrep_len == S6M_ERR_BUFFER)
             return;
         if (authrep_len < 0) {
-            LOGE("error parsing authentication reply %s", S6M_Error_Msg(authrep_len));
+            LOGE("error parsing authentication reply %s", S6M_Error_msg(authrep_len));
             close_and_free_remote(EV_A_ remote);
             close_and_free_server(EV_A_ server);
             return;
@@ -443,14 +443,14 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
         if (authrep->code != SOCKS6_AUTH_REPLY_SUCCESS)
         {
             LOGE("auth failed");
-            S6M_AuthReply_Free(authrep);
+            S6M_AuthReply_free(authrep);
             close_and_free_remote(EV_A_ remote);
             close_and_free_server(EV_A_ server);
             return;
         }
         
         server->got_authrep = 1;
-        S6M_AuthReply_Free(authrep);
+        S6M_AuthReply_free(authrep);
         
         server->buf->len -= authrep_len;
         if (server->buf->len == 0)
@@ -460,12 +460,12 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
     
     if (!server->got_oprep) {
         struct S6M_OpReply *oprep;
-        ssize_t oprep_len = S6M_OpReply_Parse((uint8_t *)server->buf->data, server->buf->len, &oprep);
+        ssize_t oprep_len = S6M_OpReply_parse((uint8_t *)server->buf->data, server->buf->len, &oprep);
         
         if (oprep_len == S6M_ERR_BUFFER)
             return;
         if (oprep_len < 0) {
-            LOGE("error parsing operation reply %s", S6M_Error_Msg(oprep_len));
+            LOGE("error parsing operation reply %s", S6M_Error_msg(oprep_len));
             close_and_free_remote(EV_A_ remote);
             close_and_free_server(EV_A_ server);
             return;
@@ -474,14 +474,14 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
         if (oprep->code != SOCKS6_OPERATION_REPLY_SUCCESS)
         {
             LOGE("operation failed %d", oprep->code);
-            S6M_OpReply_Free(oprep);
+            S6M_OpReply_free(oprep);
             close_and_free_remote(EV_A_ remote);
             close_and_free_server(EV_A_ server);
             return;
         }
         
         server->got_oprep = 1;
-        S6M_OpReply_Free(oprep);
+        S6M_OpReply_free(oprep);
         
         server->buf->len -= oprep_len;
         if (server->buf->len == 0)
@@ -565,10 +565,10 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
                 req.port = ntohs(((struct sockaddr_in *)&(server->destaddr))->sin_port);
             }
 
-            ssize_t req_len = S6M_Request_Pack(&req, (uint8_t *)abuf->data, abuf->capacity);
+            ssize_t req_len = S6M_Request_pack(&req, (uint8_t *)abuf->data, abuf->capacity);
             if (req_len < 0)
             {
-                LOGE("error packing request: %s", S6M_Error_Msg(req_len));
+                LOGE("error packing request: %s", S6M_Error_msg(req_len));
                 bfree(abuf);
                 close_and_free_remote(EV_A_ remote);
                 close_and_free_server(EV_A_ server);

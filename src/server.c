@@ -752,10 +752,10 @@ send_auth_reply(int fd)
     ssize_t size;
     uint8_t buf[1500];
     
-    size = S6M_AuthReply_Pack(&auth_rep, buf, 1500);
+    size = S6M_AuthReply_pack(&auth_rep, buf, 1500);
     if (size < 0)
     {
-        LOGE("error packing auth reply: %s", S6M_Error_Msg(size));
+        LOGE("error packing auth reply: %s", S6M_Error_msg(size));
         return -1;
     }
     
@@ -826,10 +826,10 @@ send_op_reply(int fd, enum SOCKS6OperationReplyCode code, int bind_fd, uint16_t 
     ssize_t size;
     uint8_t buf[1500];
     
-    size = S6M_OpReply_Pack(&op_rep, buf, 1500);
+    size = S6M_OpReply_pack(&op_rep, buf, 1500);
     if (size < 0)
     {
-        LOGE("error packing op reply: %s", S6M_Error_Msg(size));
+        LOGE("error packing op reply: %s", S6M_Error_msg(size));
         return -1;
     }
     
@@ -922,11 +922,11 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         }
         return;
     } else if (server->stage == STAGE_INIT) {
-        ssize_t req_len = S6M_Request_Parse((uint8_t *)server->buf->data, server->buf->len, &server->req);
+        ssize_t req_len = S6M_Request_parse((uint8_t *)server->buf->data, server->buf->len, &server->req);
         if (req_len == S6M_ERR_BUFFER)
             return;
         if (req_len < 0){
-            LOGE("error parsing request: %s", S6M_Error_Msg(req_len));
+            LOGE("error parsing request: %s", S6M_Error_msg(req_len));
             close_and_free_server(EV_A_ server);
             return;
         }
@@ -1574,7 +1574,7 @@ free_server(server_t *server)
     }
     
     if (server->req)
-        S6M_Request_Free(server->req);
+        S6M_Request_free(server->req);
 
     ss_free(server->recv_ctx);
     ss_free(server->send_ctx);
