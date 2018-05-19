@@ -742,7 +742,7 @@ was_tfo(int fd)
     if (!save_syns)
         return 0;
     
-    int rc = S6U_Socket_TFOAttempted(fd);
+    int rc = S6U_Socket_tfoAttempted(fd);
     if (rc < 0) {
         LOGE("getsockopt(TCP_SAVED_SYN) failed: %d", errno);
         return 0;
@@ -1335,7 +1335,7 @@ main(int argc, char **argv)
             
             if (fast_open && !force_tfo)
             {
-                if (S6U_Socket_SaveSYN(listenfd) == 0)
+                if (S6U_Socket_saveSYN(listenfd) == 0)
                     save_syns = 1;
                 else
                     LOGE("can't detect TFO connection attempts: %s", strerror(errno));

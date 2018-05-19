@@ -817,7 +817,7 @@ send_op_reply(int fd, enum SOCKS6OperationReplyCode code, int bind_fd, uint16_t 
         .code = code,
         .initDataOff = data_offset,
         .optionSet = {
-            .mptcp = S6U_Socket_HasMPTCP(bind_fd),
+            .mptcp = S6U_Socket_hasMPTCP(bind_fd),
         },
     };
     
