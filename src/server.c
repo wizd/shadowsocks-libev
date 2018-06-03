@@ -45,7 +45,7 @@
 #endif
 #include <libcork/core.h>
 
-#include <socks6util.h>
+#include <socks6util/socks6util.h>
 
 #if defined(HAVE_SYS_IOCTL_H) && defined(HAVE_NET_IF_H) && defined(__linux__)
 #include <net/if.h>

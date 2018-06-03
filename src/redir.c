@@ -43,8 +43,8 @@
 
 #include <libcork/core.h>
 
-#include <socks6msg.h>
-#include <socks6util.h>
+#include <socks6msg/socks6msg.h>
+#include <socks6util/socks6util.h>
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"

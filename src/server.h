@@ -32,7 +32,7 @@
 #include <ev.h>
 #endif
 
-#include <socks6msg.h>
+#include <socks6msg/socks6msg.h>
 
 #ifdef __MINGW32__
 #include "winsock.h"

@@ -51,7 +51,7 @@
 
 #include <libcork/core.h>
 
-#include <socks6msg.h>
+#include <socks6msg/socks6msg.h>
 
 #include "netutils.h"
 #include "utils.h"
