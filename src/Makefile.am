@@ -12,8 +12,6 @@ endif
 AM_CFLAGS += $(LIBPCRE_CFLAGS)
 
 SS_COMMON_LIBS = $(INET_NTOP_LIB) $(LIBPCRE_LIBS)
-SS_COMMON_LIBS += $(top_builddir)/libsocks6msg/libsocks6msg.a
-SS_COMMON_LIBS += $(top_builddir)/libsocks6util/libsocks6util.a
 if !USE_SYSTEM_SHARED_LIB
 SS_COMMON_LIBS += $(top_builddir)/libbloom/libbloom.la \
                   $(top_builddir)/libipset/libipset.la \
@@ -21,7 +19,7 @@ SS_COMMON_LIBS += $(top_builddir)/libbloom/libbloom.la \
 else
 SS_COMMON_LIBS += -lbloom -lcork -lcorkipset
 endif
-SS_COMMON_LIBS += -lev -lsodium -lm -lstdc++
+SS_COMMON_LIBS += -lev -lsodium -lm -lsocks6msg -lsocks6util -lstdc++
 
 bin_PROGRAMS = ss-local ss-tunnel ss-server
 if !BUILD_WINCOMPAT
