@@ -43,6 +43,9 @@
 
 #include <libcork/core.h>
 
+#include <socks6msg/socks6msg.h>
+#include <socks6util/socks6util.h>
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -101,9 +104,11 @@ static int mode      = TCP_ONLY;
 #ifdef HAVE_SETRLIMIT
 static int nofile = 0;
 #endif
-int fast_open       = 0;
-static int no_delay = 0;
-static int ret_val  = 0;
+static int fast_open = 0;
+static int no_delay  = 0;
+static int ret_val   = 0;
+static int force_tfo = 0;
+static int save_syns = 0;
 
 static struct ev_signal sigint_watcher;
 static struct ev_signal sigterm_watcher;
@@ -140,6 +145,32 @@ setnonblocking(int fd)
         flags = 0;
     }
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+int
+setfastopen(int fd)
+{
+    int s = 0;
+#ifdef TCP_FASTOPEN
+    if (fast_open) {
+#ifdef __APPLE__
+        int opt = 1;
+#else
+        int opt = 5;
+#endif
+        s = setsockopt(fd, IPPROTO_TCP, TCP_FASTOPEN, &opt, sizeof(opt));
+
+        if (s == -1) {
+            if (errno == EPROTONOSUPPORT || errno == ENOPROTOOPT) {
+                LOGE("fast open is not supported on this platform");
+                fast_open = 0;
+            } else {
+                ERROR("setsockopt");
+            }
+        }
+    }
+#endif
+    return s;
 }
 
 int
@@ -424,6 +455,68 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
     } else if (err == CRYPTO_NEED_MORE) {
         return; // Wait for more
     }
+    
+    if (!server->got_authrep) {
+        struct S6M_AuthReply *authrep;
+        ssize_t authrep_len = S6M_AuthReply_parse((uint8_t *)server->buf->data, server->buf->len, &authrep);
+        
+        if (authrep_len == S6M_ERR_BUFFER)
+            return;
+        if (authrep_len < 0) {
+            LOGE("error parsing authentication reply %s", S6M_Error_msg(authrep_len));
+            close_and_free_remote(EV_A_ remote);
+            close_and_free_server(EV_A_ server);
+            return;
+        }
+        
+        if (authrep->code != SOCKS6_AUTH_REPLY_SUCCESS)
+        {
+            LOGE("auth failed");
+            S6M_AuthReply_free(authrep);
+            close_and_free_remote(EV_A_ remote);
+            close_and_free_server(EV_A_ server);
+            return;
+        }
+        
+        server->got_authrep = 1;
+        S6M_AuthReply_free(authrep);
+        
+        server->buf->len -= authrep_len;
+        if (server->buf->len == 0)
+            return;
+        memmove(server->buf->data, server->buf->data + authrep_len, server->buf->len);
+    }
+    
+    if (!server->got_oprep) {
+        struct S6M_OpReply *oprep;
+        ssize_t oprep_len = S6M_OpReply_parse((uint8_t *)server->buf->data, server->buf->len, &oprep);
+        
+        if (oprep_len == S6M_ERR_BUFFER)
+            return;
+        if (oprep_len < 0) {
+            LOGE("error parsing operation reply %s", S6M_Error_msg(oprep_len));
+            close_and_free_remote(EV_A_ remote);
+            close_and_free_server(EV_A_ server);
+            return;
+        }
+        
+        if (oprep->code != SOCKS6_OPERATION_REPLY_SUCCESS)
+        {
+            LOGE("operation failed %d", oprep->code);
+            S6M_OpReply_free(oprep);
+            close_and_free_remote(EV_A_ remote);
+            close_and_free_server(EV_A_ server);
+            return;
+        }
+        
+        server->got_oprep = 1;
+        S6M_OpReply_free(oprep);
+        
+        server->buf->len -= oprep_len;
+        if (server->buf->len == 0)
+            return;
+        memmove(server->buf->data, server->buf->data + oprep_len, server->buf->len);
+    }
 
     int s = send(server->fd, server->buf->data, server->buf->len, 0);
 
@@ -483,30 +576,34 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
             buffer_t ss_addr_to_send;
             buffer_t *abuf = &ss_addr_to_send;
             balloc(abuf, SOCKET_BUF_SIZE);
+            
+            struct S6M_Request req;
+            memset(&req, 0, sizeof(struct S6M_Request));
+            
+            req.code = SOCKS6_REQUEST_CONNECT;
+            req.optionSet.tfo = server->try_tfo;
 
             if (AF_INET6 == server->destaddr.ss_family) { // IPv6
-                abuf->data[abuf->len++] = 4;          // Type 4 is IPv6 address
-
-                size_t in6_addr_len = sizeof(struct in6_addr);
-                memcpy(abuf->data + abuf->len,
-                       &(((struct sockaddr_in6 *)&(server->destaddr))->sin6_addr),
-                       in6_addr_len);
-                abuf->len += in6_addr_len;
-                memcpy(abuf->data + abuf->len,
-                       &(((struct sockaddr_in6 *)&(server->destaddr))->sin6_port),
-                       2);
+                req.addr.type = SOCKS6_ADDR_IPV6;
+                req.addr.ipv6 = ((struct sockaddr_in6 *)&(server->destaddr))->sin6_addr;
+                req.port = ntohs(((struct sockaddr_in6 *)&(server->destaddr))->sin6_port);
             } else {                             // IPv4
-                abuf->data[abuf->len++] = 1; // Type 1 is IPv4 address
-
-                size_t in_addr_len = sizeof(struct in_addr);
-                memcpy(abuf->data + abuf->len,
-                       &((struct sockaddr_in *)&(server->destaddr))->sin_addr, in_addr_len);
-                abuf->len += in_addr_len;
-                memcpy(abuf->data + abuf->len,
-                       &((struct sockaddr_in *)&(server->destaddr))->sin_port, 2);
+                req.addr.type = SOCKS6_ADDR_IPV4;
+                req.addr.ipv4 = ((struct sockaddr_in *)&(server->destaddr))->sin_addr;
+                req.port = ntohs(((struct sockaddr_in *)&(server->destaddr))->sin_port);
             }
 
-            abuf->len += 2;
+            ssize_t req_len = S6M_Request_pack(&req, (uint8_t *)abuf->data, abuf->capacity);
+            if (req_len < 0)
+            {
+                LOGE("error packing request: %s", S6M_Error_msg(req_len));
+                bfree(abuf);
+                close_and_free_remote(EV_A_ remote);
+                close_and_free_server(EV_A_ server);
+                return;
+            }
+            
+            abuf->len = req_len;
 
             int err = crypto->encrypt(abuf, server->e_ctx, SOCKET_BUF_SIZE);
             if (err) {
@@ -664,6 +761,21 @@ close_and_free_remote(EV_P_ remote_t *remote)
     }
 }
 
+static int
+was_tfo(int fd)
+{
+    if (!save_syns)
+        return 0;
+    
+    int rc = S6U_Socket_tfoAttempted(fd);
+    if (rc < 0) {
+        LOGE("getsockopt(TCP_SAVED_SYN) failed: %d", errno);
+        return 0;
+    }
+    
+    return rc;
+}
+
 static server_t *
 new_server(int fd)
 {
@@ -692,6 +804,10 @@ new_server(int fd)
 
     ev_timer_init(&server->delayed_connect_watcher, delayed_connect_cb, 0.05,
                   0);
+    
+    server->try_tfo  = force_tfo || (fast_open && was_tfo(fd) > 0);
+    server->got_authrep = 0;
+    server->got_oprep = 0;
 
     return server;
 }
@@ -937,7 +1053,8 @@ main(int argc, char **argv)
         { "password",    required_argument, NULL, GETOPT_VAL_PASSWORD    },
         { "key",         required_argument, NULL, GETOPT_VAL_KEY         },
         { "help",        no_argument,       NULL, GETOPT_VAL_HELP        },
-        { NULL,          0,                 NULL, 0                      }
+        { "force-tfo",   no_argument,       NULL, GETOPT_VAL_FORCE_TFO   },
+        { NULL,                          0, NULL,                      0 }
     };
 
     opterr = 0;
@@ -1053,6 +1170,9 @@ main(int argc, char **argv)
             LOGE("Unrecognized option: %s", optarg);
             opterr = 1;
             break;
+        case GETOPT_VAL_FORCE_TFO:
+            force_tfo = 1;
+            break;
         }
     }
 
@@ -1150,7 +1270,7 @@ main(int argc, char **argv)
     }
 
     if (remote_num == 0 || remote_port == NULL || local_port == NULL
-        || (password == NULL && key == NULL)) {
+        || (strcmp(method ? method : "", "plain") && password == NULL && key == NULL)) {
         usage();
         exit(EXIT_FAILURE);
     }
@@ -1335,7 +1455,16 @@ main(int argc, char **argv)
             if (listen(listenfd, SOMAXCONN) == -1) {
                 FATAL("listen() error");
             }
+            setfastopen(listenfd);
             setnonblocking(listenfd);
+            
+            if (fast_open && !force_tfo)
+            {
+                if (S6U_Socket_saveSYN(listenfd) == 0)
+                    save_syns = 1;
+                else
+                    LOGE("can't detect TFO connection attempts: %s", strerror(errno));
+            }
 
             listen_ctx_current->fd = listenfd;
 

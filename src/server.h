@@ -32,6 +32,8 @@
 #include <ev.h>
 #endif
 
+#include <socks6msg/socks6msg.h>
+
 #ifdef __MINGW32__
 #include "winsock.h"
 #endif
@@ -93,6 +95,8 @@ typedef struct server {
 #ifdef USE_NFCONNTRACK_TOS
     struct dscptracker *tracker;
 #endif
+    
+    struct S6M_Request *req;
 } server_t;
 
 typedef struct query {

@@ -45,6 +45,8 @@
 #endif
 #include <libcork/core.h>
 
+#include <socks6util/socks6util.h>
+
 #if defined(HAVE_SYS_IOCTL_H) && defined(HAVE_NET_IF_H) && defined(__linux__)
 #include <net/if.h>
 #include <sys/ioctl.h>
@@ -79,6 +81,11 @@ enum datatypes {
 
 #ifndef EWOULDBLOCK
 #define EWOULDBLOCK EAGAIN
+#endif
+
+
+#ifndef BUF_SIZE
+#define BUF_SIZE 2048
 #endif
 
 #ifndef SSMAXCONN
@@ -735,7 +742,7 @@ connect_to_remote(EV_P_ struct addrinfo *res,
 
     remote_t *remote = new_remote(sockfd);
 
-    if (fast_open) {
+    if (fast_open && server->req->optionSet.tfo) {
 #if defined(MSG_FASTOPEN) && !defined(TCP_FASTOPEN_CONNECT)
         int s = -1;
         s = sendto(sockfd, server->buf->data + server->buf->idx, server->buf->len,
@@ -826,7 +833,7 @@ connect_to_remote(EV_P_ struct addrinfo *res,
         }
     }
 
-    if (!fast_open) {
+    if (!fast_open || !server->req->optionSet.tfo) {
         int r = connect(sockfd, res->ai_addr, res->ai_addrlen);
 
         if (r == -1 && errno != CONNECT_IN_PROGRESS) {
@@ -930,6 +937,126 @@ setTosFromConnmark(remote_t *remote, server_t *server)
 
 #endif
 
+static ssize_t
+send_stuff(int fd, const uint8_t *buf, size_t size)
+{
+    do
+    {
+        ssize_t sent = send(fd, buf, size, 0);
+        if (sent < 0)
+        {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                continue;
+            
+            return -1;
+        }
+        buf += sent;
+        size -= sent;
+    }
+    while (size > 0);
+    
+    return 0;
+}
+
+static int
+send_auth_reply(int fd)
+{
+    struct S6M_AuthReply auth_rep = {
+        .code = SOCKS6_AUTH_REPLY_SUCCESS,
+        .method = SOCKS6_METHOD_NOAUTH,
+    };
+    
+    ssize_t size;
+    uint8_t buf[1500];
+    
+    size = S6M_AuthReply_pack(&auth_rep, buf, 1500);
+    if (size < 0)
+    {
+        LOGE("error packing auth reply: %s", S6M_Error_msg(size));
+        return -1;
+    }
+    
+    size = send_stuff(fd, buf, size);
+    if (size < 0)
+        return -1;
+    
+    return 0;
+}
+
+static void
+fill_address(struct S6M_OpReply *op_reply, int fd)
+{
+    op_reply->addr.type = SOCKS6_ADDR_IPV4;
+    op_reply->addr.ipv4.s_addr = 0;
+    
+    if (fd < 0)
+        return;
+    
+    char sockaddr_buf[sizeof(struct sockaddr_in6)]; //the biggest one
+    socklen_t len = sizeof(sockaddr_buf);
+    struct sockaddr *addr = (struct sockaddr *)sockaddr_buf;
+    int err;
+    
+    memset(sockaddr_buf, 0, len);
+    err = getsockname(fd, addr, &len);
+    if (err < 0)
+    {
+        LOGE("getsockname error %d", errno);
+        return;
+    }
+    
+    if (addr->sa_family == AF_INET)
+    {
+        struct sockaddr_in *addr_4 = (struct sockaddr_in *)addr;
+        
+        op_reply->addr.type = SOCKS6_ADDR_IPV4;
+        op_reply->addr.ipv4 = addr_4->sin_addr;
+        op_reply->port = ntohs(addr_4->sin_port);
+    }
+    else if (addr->sa_family == AF_INET6)
+    {
+        struct sockaddr_in6 *addr_6 = (struct sockaddr_in6 *)addr;
+        
+        op_reply->addr.type = SOCKS6_ADDR_IPV6;
+        op_reply->addr.ipv6 = addr_6->sin6_addr;
+        op_reply->port = ntohs(addr_6->sin6_port);
+    }
+    else // IPv7?
+    {
+        LOGE("getsockname returned weird AF %d", addr->sa_family);
+    }
+}
+
+static int
+send_op_reply(int fd, enum SOCKS6OperationReplyCode code, int bind_fd, uint16_t data_offset)
+{
+    struct S6M_OpReply op_rep = {
+        .code = code,
+        .initDataOff = data_offset,
+        .optionSet = {
+            .mptcp = S6U_Socket_hasMPTCP(bind_fd),
+        },
+    };
+    
+    fill_address(&op_rep, bind_fd);
+    
+    ssize_t size;
+    uint8_t buf[1500];
+    
+    size = S6M_OpReply_pack(&op_rep, buf, 1500);
+    if (size < 0)
+    {
+        LOGE("error packing op reply: %s", S6M_Error_msg(size));
+        return -1;
+    }
+    
+    size = send_stuff(fd, buf, size);
+    if (size < 0)
+        return -1;
+    
+    return 0;
+}
+
 static void
 server_recv_cb(EV_P_ ev_io *w, int revents)
 {
@@ -1010,21 +1137,26 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         }
         return;
     } else if (server->stage == STAGE_INIT) {
-        /*
-         * Shadowsocks TCP Relay Header:
-         *
-         *    +------+----------+----------+
-         *    | ATYP | DST.ADDR | DST.PORT |
-         *    +------+----------+----------+
-         *    |  1   | Variable |    2     |
-         *    +------+----------+----------+
-         *
-         */
+        ssize_t req_len = S6M_Request_parse((uint8_t *)server->buf->data, server->buf->len, &server->req);
+        if (req_len == S6M_ERR_BUFFER)
+            return;
+        if (req_len < 0){
+            LOGE("error parsing request: %s", S6M_Error_msg(req_len));
+            close_and_free_server(EV_A_ server);
+            return;
+        }
+        
+        ssize_t size = send_auth_reply(server->fd);
+        if (size < 0)
+        {
+            LOGE("error sending auth reply");
+            close_and_free_server(EV_A_ server);
+            return;
+        }
 
-        int offset     = 0;
         int need_query = 0;
-        char atyp      = server->buf->data[offset++];
-        char host[255] = { 0 };
+        char atyp      = server->req->addr.type;
+        char host[257] = { 0 };
         uint16_t port  = 0;
         struct addrinfo info;
         struct sockaddr_storage storage;
@@ -1035,7 +1167,6 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         if ((atyp & ADDRTYPE_MASK) == 1) {
             // IP V4
             struct sockaddr_in *addr = (struct sockaddr_in *)&storage;
-            size_t in_addr_len       = sizeof(struct in_addr);
             addr->sin_family = AF_INET;
             if (server->buf->len >= in_addr_len + 3) {
                 memcpy(&addr->sin_addr, server->buf->data + offset, in_addr_len);
@@ -1048,6 +1179,10 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
                 return;
             }
             memcpy(&addr->sin_port, server->buf->data + offset, sizeof(uint16_t));
+            addr->sin_addr = server->req->addr.ipv4;
+            inet_ntop(AF_INET, (const void *)(&server->req->addr.ipv4),
+                      host, INET_ADDRSTRLEN);
+            addr->sin_port   = htons(server->req->port);
             info.ai_family   = AF_INET;
             info.ai_socktype = SOCK_STREAM;
             info.ai_protocol = IPPROTO_TCP;
@@ -1064,6 +1199,8 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
                 stop_server(EV_A_ server);
                 return;
             }
+            uint8_t name_len = strlen(server->req->addr.domain);
+            memcpy(host, server->req->addr.domain, name_len);
             if (acl && outbound_block_match_host(host) == 1) {
                 if (verbose)
                     LOGI("outbound blocked %s", host);
@@ -1077,7 +1214,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
                 if (ip.version == 4) {
                     struct sockaddr_in *addr = (struct sockaddr_in *)&storage;
                     inet_pton(AF_INET, host, &(addr->sin_addr));
-                    memcpy(&addr->sin_port, server->buf->data + offset, sizeof(uint16_t));
+                    addr->sin_port   = htons(server->req->port);
                     addr->sin_family = AF_INET;
                     info.ai_family   = AF_INET;
                     info.ai_addrlen  = sizeof(struct sockaddr_in);
@@ -1085,7 +1222,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
                 } else if (ip.version == 6) {
                     struct sockaddr_in6 *addr = (struct sockaddr_in6 *)&storage;
                     inet_pton(AF_INET6, host, &(addr->sin6_addr));
-                    memcpy(&addr->sin6_port, server->buf->data + offset, sizeof(uint16_t));
+                    addr->sin6_port   = htons(server->req->port);
                     addr->sin6_family = AF_INET6;
                     info.ai_family    = AF_INET6;
                     info.ai_addrlen   = sizeof(struct sockaddr_in6);
@@ -1102,7 +1239,6 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         } else if ((atyp & ADDRTYPE_MASK) == 4) {
             // IP V6
             struct sockaddr_in6 *addr = (struct sockaddr_in6 *)&storage;
-            size_t in6_addr_len       = sizeof(struct in6_addr);
             addr->sin6_family = AF_INET6;
             if (server->buf->len >= in6_addr_len + 3) {
                 memcpy(&addr->sin6_addr, server->buf->data + offset, in6_addr_len);
@@ -1116,6 +1252,8 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
                 return;
             }
             memcpy(&addr->sin6_port, server->buf->data + offset, sizeof(uint16_t));
+            addr->sin6_addr = server->req->addr.ipv6;
+            addr->sin6_port  = htons(server->req->port);
             info.ai_family   = AF_INET6;
             info.ai_socktype = SOCK_STREAM;
             info.ai_protocol = IPPROTO_TCP;
@@ -1141,6 +1279,10 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
             server->buf->len -= offset;
             server->buf->idx = offset;
         }
+        port = htons(server->req->port);
+
+        server->buf->len -= req_len;
+        memmove(server->buf->data, server->buf->data + req_len, server->buf->len);
 
         if (verbose) {
             if ((atyp & ADDRTYPE_MASK) == 4)
@@ -1154,6 +1296,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
 
             if (remote == NULL) {
                 LOGE("connect error");
+                send_op_reply(server->fd, SOCKS6_OPERATION_REPLY_REFUSED, -1, 0);
                 close_and_free_server(EV_A_ server);
                 return;
             } else {
@@ -1287,6 +1430,7 @@ resolv_cb(struct sockaddr *addr, void *data)
 
     if (addr == NULL) {
         LOGE("unable to resolve %s", query->hostname);
+        send_op_reply(server->fd, SOCKS6_OPERATION_REPLY_FAILURE, -1, 0);
         close_and_free_server(EV_A_ server);
     } else {
         if (verbose) {
@@ -1310,6 +1454,7 @@ resolv_cb(struct sockaddr *addr, void *data)
         remote_t *remote = connect_to_remote(EV_A_ & info, server);
 
         if (remote == NULL) {
+            send_op_reply(server->fd, SOCKS6_OPERATION_REPLY_REFUSED, -1, 0);
             close_and_free_server(EV_A_ server);
         } else {
             server->remote = remote;
@@ -1465,8 +1610,21 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
         struct sockaddr_storage addr;
         socklen_t len = sizeof(struct sockaddr_storage);
         memset(&addr, 0, len);
-
         int r = getpeername(remote->fd, (struct sockaddr *)&addr, &len);
+        if (r == 0) {
+            if (verbose) {
+                LOGI("remote connected");
+            }
+            remote_send_ctx->connected = 1;
+            
+            if (send_op_reply(server->fd, SOCKS6_OPERATION_REPLY_SUCCESS, remote->fd, server->req->initialDataLen) < 0)
+            {
+                LOGE("error sending op reply");
+                close_and_free_remote(EV_A_ remote);
+                close_and_free_server(EV_A_ server);
+                return;
+            }
+        }
 
         if (r == 0) {
             remote_send_ctx->connected = 1;
@@ -1481,6 +1639,7 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
         } else {
             ERROR("getpeername");
             // not connected
+            send_op_reply(server->fd, SOCKS6_OPERATION_REPLY_REFUSED, -1, 0);
             close_and_free_remote(EV_A_ remote);
             close_and_free_server(EV_A_ server);
             return;
@@ -1632,6 +1791,8 @@ new_server(int fd, listen_ctx_t *listener)
                   timeout, timeout);
 
     cork_dllist_add(&connections, &server->entries);
+    
+    server->req = NULL;
 
     return server;
 }
@@ -1667,6 +1828,9 @@ free_server(server_t *server)
         bfree(server->buf);
         ss_free(server->buf);
     }
+    
+    if (server->req)
+        S6M_Request_free(server->req);
 
     ss_free(server->recv_ctx);
     ss_free(server->send_ctx);
@@ -2100,7 +2264,7 @@ main(int argc, char **argv)
     }
 
     if (server_num == 0 || server_port == NULL
-        || (password == NULL && key == NULL)) {
+        || (strcmp(method, "plain") && password == NULL && key == NULL)) {
         usage();
         exit(EXIT_FAILURE);
     }
